@@ -1,0 +1,290 @@
+rm(list=ls())
+
+library(ggplot2)
+library(timeDate)
+library(reshape2)
+library(grid)
+library(gridExtra)
+
+
+# Model parameters
+mu <- 0.3
+sigma <- 0.2
+sigma_imp <- 0.3
+
+# Market parameters
+q <- 0
+r <- 0.05
+S0 <- 100
+K <- 100 # Initially at-the-money
+T <- 0.25
+
+# Time grid
+N <- 1000
+M <- 20
+t <- seq(0,T,length=N+1) # N intervals
+tau <- T -t 
+dt <- T/N   # Equidistant time step for each simulated path
+
+## Functions used
+d1 <- function(S,K,r,q,sigma,tau){
+  (log(S/K)+(r-q)*tau + 1/2*sigma^2*tau)/(sigma*sqrt(tau))
+}
+
+
+d2 <- function(S,K,r,q,sigma,tau){
+  d1(S,K,r,q,sigma,tau) - sigma*sqrt(tau)
+}
+
+
+# Black-Scholes Price function
+C <- function(S,K,r,q,sigma,tau,option="Call"){
+  d1 <- d1(S,K,r,q,sigma,tau)
+  d2 <- d2(S,K,r,q,sigma,tau)
+  
+  if (option=="Call"){
+    result <- exp(-q*tau)*S*pnorm(d1) - K*exp(-r*tau)*pnorm(d2)
+  }
+  
+  if (option=="Put"){
+    result <-  exp(-q*tau)*S*pnorm(d1) - K*exp(-r*tau)*pnorm(d2) -exp(-q*tau)*S + K*exp(-r*tau)
+  }
+  result
+}
+C <- Vectorize(C)
+
+# Black-Scholes Delta
+BS.Delta <- function(S,K,r,q,sigma,tau,option="Call"){
+  
+  if (option == "Call"){
+    result <-  exp(-q*tau)*pnorm(d1(S,K,r,q,sigma,tau))
+  }
+  
+  if (option == "Put"){
+    result <-  exp(-q*tau)*(pnorm(d1(S,K,r,q,sigma,tau))-1)
+  }
+  
+  result
+}
+
+BS.Delta <- Vectorize(BS.Delta)
+
+# Black-Scholes Gamma
+BS.Gamma <- function(S,K,r,q,sigma,tau,option="Call"){
+  
+  if (option == "Call"){
+    result <-  exp(-q*tau)*dnorm(d1(S,K,r,q,sigma,tau))/(S*sigma*sqrt(tau))
+  }
+  
+  if (option == "Put"){
+    result <-  exp(-q*tau)*dnorm(d1(S,K,r,q,sigma,tau))/(S*sigma*sqrt(tau))
+  }
+  
+  result
+}
+
+BS.Gamma <- Vectorize(BS.Gamma)
+
+# Delta hedge strategi funktion
+delta_hedge_error <- function(S,K,r,q,sigma, tau, call_price, strategy=-1,option="Call"){
+  
+  delta   <- BS.Delta(S=S,K=K,r=r,q=q, sigma=sigma_h,tau=tau, option=option)
+  gamma   <- BS.Gamma(S=S, K=K, r=r,q=q, sigma=sigma_h,tau=tau,option=option)
+  
+  n            <- length(S[-length(S)])
+  V            <- numeric(n+1); V[1] <- call_price[1] # Value process 
+  Pi           <- numeric(n+1);Pi[1]  <- 0  ### Path of PL/Hedging Error
+  dPi          <- numeric(n+1);dPi[1] <- 0  ### Hedging error over time interval
+  
+  if (length(r)==1){r<-rep(r,n)}
+  if (length(q)==1){q<-rep(q,n)}
+  
+  for (i in 1:n){
+    B       <- Pi[i] + strategy*delta[i]*S[i] - strategy*call_price[i] # Rebalance with money account
+    V[i+1] <- exp(r[i]*dt)*B - strategy*delta[i]*exp(q[i]*dt)*S[i+1] # Mark-to-market for portfolio
+    Pi[i+1] <- V[i+1] + strategy*call_price[i+1] # Mark-to-market for adjusted portfolio/cumulated hedging error
+    dPi[i+1] <- Pi[i+1] - Pi[i] # 
+  }
+  output=list(pf_value= V, error_cum = Pi, error_dt = dPi) # Save output
+}
+
+
+## Simulate S and illustrate corresponding arbitrage-free price
+
+# Tomme vektorer og matricer
+Error <- matrix(nrow = N+1, ncol = M)
+call_price_imp <- matrix(nrow = N+1, ncol = M)
+call_price_sand <- matrix(nrow = N+1, ncol = M)
+Stock <- matrix(nrow = N+1, ncol = M)
+Delta <- matrix(nrow = N+1, ncol = M)
+Gamma <- matrix(nrow = N+1, ncol = M)
+Call_diff <- numeric(M)
+
+set.seed(300)
+for (i in 1:M){
+  # Simulate S under P
+  Z <- rnorm(N, mean=0, sd=1) 
+  X <- cumsum((mu-1/2*sigma^2)*dt + sigma*sqrt(dt)*Z)
+  S <- c(S0,S0*exp(X))
+  Stock[,i] <- S
+  call_price_imp[,i] <- C(S=S, K=K, r=r,q=q, sigma=sigma_imp,tau=tau)
+  call_price_sand[,i] <- C(S=S, K=K, r=r,q=q, sigma=sigma,tau=tau)
+  Call_diff[i] <- call_price_imp[1]-call_price_sand[1]
+}
+
+
+
+# Delta hedge med "sand" vol
+for (i in 1:M){
+S <- c(Stock[,i])
+
+sigma_h <- sigma
+
+call_price <- c(call_price_imp[,i])
+delta <- BS.Delta(S=S, K=K, r=r,q=q, sigma=sigma_h,tau=tau)
+gamma <- BS.Gamma(S=S, K=K, r=r,q=q, sigma=sigma_h,tau=tau)
+
+res <- delta_hedge_error(S=S,K=K,r=r,q=0,sigma=sigma, tau=tau, call_price=call_price, strategy=-1,option="Call")
+Error[,i] <- res$error_cum
+Delta[,i] <- delta
+Gamma[,i] <- gamma
+}
+
+# Forcast vs simulation af profit
+Profit <- mean(Error[N+1,])
+Profit_forcast <- mean(Call_diff)
+Profit_diff <- abs(Profit - Profit_forcast)
+Profit_diff
+
+
+# Plot error_imp
+df_error <- data.frame(time=t, error=Error)
+df_melt <- melt(df_error, id = "time")
+
+p1 <- ggplot(data=df_melt, aes(x=time, y=value, color=variable)) + 
+  geom_line(size=1) +
+  xlab("time") +
+  ylab("Value") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  ggtitle("Hedging Error med 'sand' vol")+
+  theme(plot.title = element_text(lineheight=1) # face="bold"
+        ,axis.text.x = element_text(angle = 0, hjust = 1,vjust=1)) + theme(legend.position = "none")
+
+Error_imp <- matrix(nrow = N+1, ncol = M)
+Delta_imp <- matrix(nrow = N+1, ncol = M)
+Gamma_imp <- matrix(nrow = N+1, ncol = M)
+
+
+# Delta hedge med "sand" vol
+for (i in 1:M){
+  S <- c(Stock[,i])
+  
+  sigma_h <- sigma_imp
+  
+  call_price <- c(call_price_imp[,i])
+  delta <- BS.Delta(S=S, K=K, r=r,q=q, sigma=sigma_h,tau=tau)
+  gamma <- BS.Gamma(S=S, K=K, r=r,q=q, sigma=sigma_h,tau=tau)
+  
+  res <- delta_hedge_error(S=S,K=K,r=r,q=0,sigma=sigma, tau=tau, call_price=call_price, strategy=-1,option="Call")
+  Error_imp[,i] <- res$error_cum
+  Delta_imp[,i] <- delta
+  Gamma_imp[,i] <- gamma
+}
+
+# Plot error_imp
+df_error_imp <- data.frame(time=t, error=Error_imp)
+df_melt_imp <- melt(df_error_imp, id = "time")
+
+p2 <- ggplot(data=df_melt_imp, aes(x=time, y=value, color=variable)) + 
+  geom_line(size=1) +
+  xlab("time") +
+  ylab("Value") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  ggtitle("Hedging Error med implied vol")+
+  theme(plot.title = element_text(lineheight=1) # face="bold"
+        ,axis.text.x = element_text(angle = 0, hjust = 1,vjust=1)) + theme(legend.position = "none")
+
+p1
+p2
+
+Profit_imp <- mean(Error_imp[N,])
+
+Profit; Profit_imp
+
+# Plot Delta
+df_delta <- data.frame(time=t, delta=Delta)
+df_melt_delta <- melt(df_delta, id = "time")
+
+p3 <- ggplot(data=df_melt_delta, aes(x=time, y=value, color=variable)) + 
+  geom_line(size=1) +
+  xlab("time") +
+  ylab("Value") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  ggtitle("Delta med sand vol")+
+  theme(plot.title = element_text(lineheight=1) # face="bold"
+        ,axis.text.x = element_text(angle = 0, hjust = 1,vjust=1)) + theme(legend.position = "none")
+
+df_delta_imp <- data.frame(time=t, delta=Delta_imp)
+df_melt_delta_imp <- melt(df_delta_imp, id = "time")
+
+p4 <- ggplot(data=df_melt_delta_imp, aes(x=time, y=value, color=variable)) + 
+  geom_line(size=1) +
+  xlab("time") +
+  ylab("Value") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  ggtitle("Delta med implied vol")+
+  theme(plot.title = element_text(lineheight=1) # face="bold"
+        ,axis.text.x = element_text(angle = 0, hjust = 1,vjust=1)) + theme(legend.position = "none")
+p3
+p4
+
+# Plot Gamma
+df_gamma <- data.frame(time=t, gamma=Gamma)
+df_melt_gamma <- melt(df_gamma, id = "time")
+
+p5 <- ggplot(data=df_melt_gamma, aes(x=time, y=value, color=variable)) + 
+  geom_line(size=1) +
+  xlab("time") +
+  ylab("Value") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  ggtitle("Gamma med sand vol")+
+  theme(plot.title = element_text(lineheight=1) # face="bold"
+        ,axis.text.x = element_text(angle = 0, hjust = 1,vjust=1)) + theme(legend.position = "none")
+
+df_gamma_imp <- data.frame(time=t, gamma=Gamma_imp)
+df_melt_gamma_imp <- melt(df_gamma_imp, id = "time")
+
+p6 <- ggplot(data=df_melt_gamma_imp, aes(x=time, y=value, color=variable)) + 
+  geom_line(size=1) +
+  xlab("time") +
+  ylab("Value") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  ggtitle("Gamma med implied vol")+
+  theme(plot.title = element_text(lineheight=1) # face="bold"
+        ,axis.text.x = element_text(angle = 0, hjust = 1,vjust=1)) + theme(legend.position = "none")
+p5
+p6
+limits <- c(0, 0.4)
+breaks <- seq(limits[1], limits[2], by=.25)
+
+# assign common axis to both plots
+p1.common.y <- p6 + scale_y_continuous(limits=limits, breaks=breaks)
+p2.common.y <- p5 + scale_y_continuous(limits=limits, breaks=breaks)
+
+# At this point, they have the same axis, but the axis lengths are unequal, so ...
+
+# build the plots 
+p1.common.y <- ggplot_gtable(ggplot_build(p1.common.y))
+p2.common.y <- ggplot_gtable(ggplot_build(p2.common.y))
+
+# copy the plot height from p1 to p2
+p2.common.y$heights <- p1.common.y$heights
+
+
+
+grid.arrange(p2.common.y,ncol=1)
+grid.arrange(p1.common.y,ncol=1)
+t.test(Gamma,Gamma_imp)
+
+max(Error_imp[N+1,])
+max(Error[N+1,])
