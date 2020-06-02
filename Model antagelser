@@ -1,0 +1,93 @@
+rm(list=ls())
+
+library(ggplot2)
+library(timeDate)
+library(gridExtra)
+library(quantmod)
+
+# Nyt envirement
+env_sp500 <- new.env()
+
+#Hent Sp500 fra Yahoo! Finance
+getSymbols("^GSPC", env = env_sp500 , src = "yahoo", from = as.Date("2004-01-02"), to = as.Date("2019-12-19"), warnings = F)
+
+sp500 <- env_sp500$GSPC
+
+# Indlæs Dato og lukkeværdi i data frame
+df_stock <- data.frame(Date = index(sp500), Close = sp500$GSPC.Close, coredata = (sp500))
+df_stock$Close <- df_stock$GSPC.Close
+
+# Gem Log-afkast
+LogReturns <- diff(log(df_stock$Close))
+
+#Data frame for Log-afkast
+df_stock_returns <- data.frame(index = 1:length(LogReturns), Values=LogReturns)
+
+# Gam år som label
+years <- as.character(2004:2019)
+breakVec<- c(1)
+N <- 0
+for (i in 1:(length(years)-1)){
+  year <- years[i]
+  n <- sum(format(as.Date(as.character(df_stock$Date)),"%Y")==year)
+  breakVec <- c(breakVec,breakVec[i] + n)
+}
+labelVec <- as.character(df_stock[breakVec,]$Date)
+
+## Break og label for sidste observation
+breakVec <- c(breakVec,nrow(df_stock))
+labelVec <- c(labelVec,as.character(tail(df_stock,1)[1,1]))
+
+# Plot Sp500
+df_stock$panel <- "Daglig Lukkeværdi"
+p1 <- ggplot(data=df_stock,aes(x=1:nrow(df_stock),y=Close)) + geom_point(size=1) +
+  scale_x_continuous(breaks=breakVec,labels=labelVec) +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  ggtitle("SP500 Indeks")+
+  xlab("Dato") +
+  ylab("Værdi") +
+  facet_grid(panel~.) +
+  theme(plot.title = element_text(lineheight=0.8) # face="bold"
+        ,axis.text.x = element_text(angle = 45, hjust = 1,vjust=1))
+
+
+breakVec_returns <- breakVec -1
+breakVec_returns[1] <- 1
+df_stock_returns$panel <- "Daglig Log-afkast"
+
+p2 <- ggplot(data=df_stock_returns,aes(x=1:nrow(df_stock_returns),y=LogReturns)) + geom_point(size=1) +
+  scale_x_continuous(breaks=breakVec_returns,labels=labelVec) +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  xlab("Dato") +
+  ylab("Værdi") +
+  facet_grid(panel~.) +
+  theme(plot.title = element_text(lineheight=0.8) # face="bold"
+        ,axis.text.x = element_text(angle = 45, hjust = 1,vjust=1))
+
+grid.arrange(p1, p2, nrow=2, ncol =1)
+
+
+# Histogram over log-returns
+df_stock_returns <- data.frame(Date = df_stock$Date[-1], Close = diff(log(df_stock$Close)))
+df_stock_returns$x <- df_stock_returns$Close/sd(df_stock_returns$Close)
+
+p_hist <- ggplot(data=df_stock_returns,aes(x=x)) + 
+  geom_histogram(aes(y = ..density..), binwidth=0.1, position="identity",alpha=.5,color="black") +
+  stat_function(fun = dnorm, 
+                args = list(mean = 0, sd = 1),
+                aes(color="normal"),size=0.5)+
+  scale_colour_manual("Tæthed", values = c(2) )+
+  theme(legend.position="bottom") +
+  xlab("Standardisered Log-afkast") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  ggtitle("Histogram: Log-afkast") 
+
+p_qq <- ggplot(df_stock_returns, aes(sample = x)) + 
+  stat_qq() + 
+  stat_qq_line(aes(color="normal")) +
+  scale_colour_manual("Tæthed", values = c(2) )+
+  theme(legend.position="bottom") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  ggtitle("QQ-plot: Observeret vs. Toeretisk") 
+
+grid.arrange(p_hist,p_qq,nrow=1,ncol=2)
