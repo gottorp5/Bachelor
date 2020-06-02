@@ -1,0 +1,167 @@
+rm(list=ls())
+
+library(ggplot2)
+library(timeDate)
+library(reshape2)
+library(grid)
+library(gridExtra)
+
+# Indlæsning af datasæt
+data <- read.table(file = "optionsdata.txt", header = TRUE)
+option <- data$Option
+
+# Dimensioner
+N <- sum(option == 1) # Antal observationer per option
+M <- length(option)/N # Antal optiner
+dt <- data$t[1:N] # Tidsinterval
+
+## Functions used
+d1 <- function(S,K,r,q,sigma,tau){
+  (log(S/K)+(r-q)*tau + 1/2*sigma^2*tau)/(sigma*sqrt(tau))
+}
+d2 <- function(S,K,r,q,sigma,tau){
+  d1(S,K,r,q,sigma,tau) - sigma*sqrt(tau)
+}
+
+# Black-Scholes Price function
+C <- function(S,K,r,q,sigma,tau,option="Call"){
+  d1 <- d1(S,K,r,q,sigma,tau)
+  d2 <- d2(S,K,r,q,sigma,tau)
+  
+  if (option=="Call"){
+    result <- exp(-q*tau)*S*pnorm(d1) - K*exp(-r*tau)*pnorm(d2)
+  }
+  if (option=="Put"){
+    result <-  exp(-q*tau)*S*pnorm(d1) - K*exp(-r*tau)*pnorm(d2) -exp(-q*tau)*S + K*exp(-r*tau)
+  }
+  result
+}
+C <- Vectorize(C)
+
+# Black-Scholes Delta
+BS.Delta <- function(S,K,r,q,sigma,tau,option="Call"){
+  
+  if (option == "Call"){
+    result <-  exp(-q*tau)*pnorm(d1(S,K,r,q,sigma,tau))
+  }
+  if (option == "Put"){
+    result <-  exp(-q*tau)*(pnorm(d1(S,K,r,q,sigma,tau))-1)
+  }
+  result
+}
+
+BS.Delta <- Vectorize(BS.Delta)
+
+# Delta hedge strategi funktion
+delta_hedge_error <- function(S,K,r,q,sigma, tau, call_price, strategy=-1,option="Call"){
+  
+  delta   <- BS.Delta(S=S,K=K,r=r,q=q, sigma=sigma,tau=tau, option=option)
+  
+  n            <- length(S[-length(S)])
+  V            <- numeric(n+1); V[1] <- call_price[1] # Value process 
+  Pi           <- numeric(n+1);Pi[1]  <- 0  ### Path of PL/Hedging Error
+  dPi          <- numeric(n+1);dPi[1] <- 0  ### Hedging error over time interval
+  
+  if (length(r)==1){r<-rep(r,n)}
+  if (length(q)==1){q<-rep(q,n)}
+  
+  for (i in 1:n){
+    B       <- Pi[i] + strategy*delta[i]*S[i] - strategy*call_price[i] # Rebalance with money account
+    V[i+1] <- exp(r[i]*dt)*B - strategy*delta[i]*exp(q[i]*dt)*S[i+1] # Mark-to-market for portfolio
+    Pi[i+1] <- V[i+1] + strategy*call_price[i+1] # Mark-to-market for adjusted portfolio/cumulated hedging error
+    dPi[i+1] <- Pi[i+1] - Pi[i] # 
+  }
+  output=list(pf_value= V, error_cum = Pi, error_dt = dPi) # Save output
+}
+
+# Tomme vektorer og matricer
+Error_sand <- matrix(nrow = N, ncol = M)
+Error_imp <- matrix(nrow = N, ncol = M)
+
+# Delta hedge med "sand" vol
+for (i in 1:M){
+  para <- data[option == i,]
+  
+  S <- c(para$S)
+  K <- c(para$K)
+  r <- c(para$r)
+  q <- c(para$q)
+  sigma <- c(para$rv5)
+  tau <- c(para$tau)
+  
+  call_price <- c(para$C)
+  delta <- BS.Delta(S=S, K=K, r=r,q=q, sigma=sigma,tau=tau)
+  
+  res <- delta_hedge_error(S=S,K=K,r=r,q=0,sigma=sigma, tau=tau, call_price=call_price, strategy=-1,option="Call")
+  Error_sand[,i] <- res$error_cum
+}
+
+# Delta hedge med implied vol
+for (i in 1:M){
+  para <- data[option == i,]
+  
+  S <- c(para$S)
+  K <- c(para$K)
+  r <- c(para$r)
+  q <- c(para$q)
+  sigma <- c(para$sigma)
+  tau <- c(para$tau)
+  
+  call_prices <- c(para$C)
+  delta <- BS.Delta(S=S, K=K, r=r,q=q, sigma=sigma,tau=tau)
+  
+  res <- delta_hedge_error(S=S,K=K,r=r,q=0,sigma=sigma, tau=tau, call_price=call_price, strategy=-1,option="Call")
+  Error_imp[,i] <- res$error_cum
+}
+
+# Hvilke optioner skal vi ikke købe
+Error_df <- data.frame(id = seq(1:M), Profit_imp = Error_imp[N,], Profit_sand = Error_sand[N,])
+Tab_imp <- as.numeric(Error_df$id[Error_df$Profit_imp<=0])
+Tab_sand <- as.numeric(Error_df$id[Error_df$Profit_sand<=0])
+
+data2 <- subset(data, data$tau == 0.246031746031746)
+
+startdato <- data2$Date
+
+# Indlæs Dato og lukkeværdi i data frame
+df_stock <- data.frame(id = seq(1:length(data$S)), Date = data$Date , Close = data$S, option = data$Option)
+df_stock$Close <- df_stock$S
+df_stock$Option <- df_stock$option
+
+
+a <- numeric(length(data$S))
+a <- a+1
+for (i in 1:length(Tab_sand)){
+  a[df_stock$option == Tab_sand[i]] <- 2
+}
+b <- numeric(length(data$S))
+b <- b+1
+
+for (i in 1:length(Tab_imp)){
+  b[df_stock$option == Tab_imp[i]] <- 2
+}
+
+
+
+# Plot Sp500 med Tab
+df_stock$panel <- "Daglig Lukkeværdi"
+p1 <- ggplot(data=df_stock,aes(x=data$Date,y=data$S)) + geom_point(size=1,colour=a) +
+  scale_x_discrete(breaks = seq(0, 100, by = 5)) +
+  ggtitle("Tab med sand volatilitet")+
+  xlab("Dato") +
+  ylab("Værdi") +
+  facet_grid(panel~.) +
+  theme(plot.title = element_text(lineheight=0.8) # face="bold"
+        ,axis.text.x = element_text(angle = 45, hjust = 1,vjust=1))
+
+p2 <- ggplot(data=df_stock,aes(x=data$Date,y=data$S)) + geom_point(size=1,colour=b) +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  scale_x_discrete(breaks = seq(0, 100, by = 5)) +
+  ggtitle("Tab med implied volatilitet")+
+  xlab("Dato") +
+  ylab("Værdi") +
+  facet_grid(panel~.) +
+  theme(plot.title = element_text(lineheight=0.8) # face="bold"
+        ,axis.text.x = element_text(angle = 45, hjust = 1,vjust=1))
+
+grid.arrange(p1,p2,nrow=2,ncol=1)
