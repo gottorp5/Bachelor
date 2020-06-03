@@ -1,0 +1,145 @@
+rm(list=ls())
+
+# Indlæsning af datasæt
+data <- read.table(file = "optionsdata.txt", header = TRUE)
+option <- data$Option
+
+# Dimensioner
+M <- max(option) # Antal optiner
+N <- sum(option == 1) # Antal observationer
+dt <- data$t[1:N] # Tidsinterval
+
+# Black-Scholes model funktioner
+d1 <- function(S,K,r,q,sigma,tau){
+  (log(S/K)+(r-q)*tau + 1/2*sigma^2*tau)/(sigma*sqrt(tau))
+}
+
+d2 <- function(S,K,r,q,sigma,tau){
+  d1(S,K,r,q,sigma,tau) - sigma*sqrt(tau)
+}
+
+# Black-Scholes Delta
+BS.Delta <- function(S,K,r,q,sigma,tau,option="Call"){
+  
+  if (option == "Call"){
+    result <-  exp(-q*tau)*pnorm(d1(S,K,r,q,sigma,tau))
+  }
+  
+  if (option == "Put"){
+    result <-  exp(-q*tau)*(pnorm(d1(S,K,r,q,sigma,tau))-1)
+  }
+  
+  result
+}
+
+BS.Delta <- Vectorize(BS.Delta)
+
+# Tomme vektorer til at gemme resultater i
+Error_imp <- numeric(M)
+QV_imp <- numeric(M)
+
+Error_rv5 <- numeric(M)
+QV_rv5 <- numeric(M)
+
+#-------------------------------------------------------------------------
+# Delta hedge med implied
+#-------------------------------------------------------------------------
+for (i in 1:M){
+  para <- data[option == i,]
+  
+  S <- c(para$S)
+  K <- c(para$K)
+  r <- c(para$r)
+  q <- c(para$q)
+  sigma <- c(para$sigma)
+  tau <- c(para$tau)
+  
+  call_prices <- c(para$C)
+  
+  delta_hedge_error <- function(S,K,r,q,sigma, tau, call_price, strategy=-1,option="Call"){
+    
+    delta   <- BS.Delta(S=S,K=K,r=r,q=q, sigma=sigma,tau=tau, option=option)
+    
+    n            <- length(S[-length(S)])
+    V            <- numeric(n+1); V[1] <- call_price[1] # Value process 
+    Pi           <- numeric(n+1);Pi[1]  <- 0  ### Path of PL/Hedging Error
+    dPi          <- numeric(n+1);dPi[1] <- 0  ### Hedging error over time interval
+    
+    if (length(r)==1){r<-rep(r,n)}
+    if (length(q)==1){q<-rep(q,n)}
+    
+    for (i in 1:n){
+      B       <- Pi[i] + strategy*delta[i]*S[i] - strategy*call_price[i] # Rebalance with money account
+      V[i+1] <- exp(r[i]*dt)*B - strategy*delta[i]*exp(q[i]*dt)*S[i+1] # Mark-to-market for portfolio
+      Pi[i+1] <- V[i+1] + strategy*call_price[i+1] # Mark-to-market for adjusted portfolio/cumulated hedging error
+      dPi[i+1] <- Pi[i+1] - Pi[i] # 
+    }
+    output=list(pf_value= V, error_cum = Pi, error_dt = dPi) # Save output
+    
+  }
+  res <- delta_hedge_error(S=S,K=K,r=r,q=q,sigma=sigma, tau=tau, call_price=call_prices, strategy=-1,option="Call")
+  
+  Error_imp[i] <- res$error_cum[N]
+  QV_imp[i] <- (1/N)*sum((res$error_dt)^2)
+}
+
+#-------------------------------------------------------------------------
+# Delta hedge med RV5
+#-------------------------------------------------------------------------
+for (i in 1:M){
+  para <- data[option == i,]
+  
+  S <- c(para$S)
+  K <- c(para$K)
+  r <- c(para$r)
+  q <- c(para$q)
+  sigma <- c(para$rv5)
+  tau <- c(para$tau)
+  
+  call_prices <- c(para$C)
+  delta <- BS.Delta(S=S, K=K, r=r,q=q, sigma=sigma,tau=tau)
+  
+  delta_hedge_error <- function(S,K,r,q,sigma, tau, call_price, strategy=-1,option="Call"){
+    
+    delta   <- BS.Delta(S=S,K=K,r=r,q=q, sigma=sigma,tau=tau, option=option)
+    
+    n            <- length(S[-length(S)])
+    V            <- numeric(n+1); V[1] <- call_price[1] # Value process 
+    Pi           <- numeric(n+1);Pi[1]  <- 0  ### Path of PL/Hedging Error
+    dPi          <- numeric(n+1);dPi[1] <- 0  ### Hedging error over time interval
+    
+    if (length(r)==1){r<-rep(r,n)}
+    if (length(q)==1){q<-rep(q,n)}
+    
+    for (i in 1:n){
+      B       <- Pi[i] + strategy*delta[i]*S[i] - strategy*call_price[i] # Rebalance with money account
+      V[i+1] <- exp(r[i]*dt)*B - strategy*delta[i]*exp(q[i]*dt)*S[i+1] # Mark-to-market for portfolio
+      Pi[i+1] <- V[i+1] + strategy*call_price[i+1] # Mark-to-market for adjusted portfolio/cumulated hedging error
+      dPi[i+1] <- Pi[i+1] - Pi[i] # 
+    }
+    output=list(pf_value= V, error_cum = Pi, error_dt = dPi) # Save output
+    
+  }
+  res <- delta_hedge_error(S=S,K=K,r=r,q=q,sigma=sigma, tau=tau, call_price=call_prices, strategy=-1,option="Call")
+  
+  Error_rv5[i] <- res$error_cum[N]
+  QV_rv5[i] <- (1/N)*sum((res$error_dt)^2)
+}
+
+# Middelværdier
+
+Means <- list(Implied = mean(Error_imp), RV5 = mean(Error_rv5), KvaVar_imp = mean(QV_imp), KvaVar_RV5 = mean(QV_rv5))
+
+# Std. afvigelse
+Sds <- list(Implied = sd(Error_imp), RV5 = sd(Error_rv5), KvaVar_imp = sd(QV_imp), KvaVar_RV5 = sd(QV_rv5))
+
+
+print.table(Means)
+print.table(Sds)
+# T-test
+t.test(Error_imp, mu=0)
+t.test(Error_rv5, mu=0)
+t.test(Error_imp,Error_rv5)
+var.test(Error_imp,Error_rv5)
+t.test(QV_imp,QV_rv5)
+var.test(QV_imp,QV_rv5)
